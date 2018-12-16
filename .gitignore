@@ -522,3 +522,4 @@ ASALocalRun/
 .localhistory/
 
 # End of https://www.gitignore.io/api/git,c++,eagle,clion,visualstudio
+HeaterHardware/Heater_Gerber/
