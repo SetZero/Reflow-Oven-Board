@@ -1,0 +1,283 @@
+#include <stdio.h>
+#include <stdbool.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <memory.h>
+
+#define DEBUG
+
+typedef enum _smType {
+    unused,
+    used
+} smType;
+
+typedef struct _BlockStat {
+    size_t length;
+    size_t previous_length;
+    //smType type; //TODO: remove: type, add: size_t previous_length
+} BlockStat;
+
+typedef struct _smElement smElement;
+
+struct _smElement {
+    BlockStat stat;
+    smElement* next;
+    smElement* previous;
+};
+
+static size_t breakSize = 4096;
+static size_t minimumSize = sizeof(smElement) * 2;
+static bool isInitialized = false;
+static smElement* smList = NULL;
+static void* minimumStack;
+#ifdef LIBARY
+extern void* malloc(size_t);
+extern void sfree(void*);
+extern void* calloc(size_t nelements, size_t elsize);
+extern void* realloc(void* ptr, size_t size);
+#else
+extern void* smalloc(size_t length);
+extern void sfree(void*);
+#endif
+
+
+smElement* searchFreeList(size_t length);
+smElement* insertFreeBlock(BlockStat* block);
+BlockStat* removeFreeBlock(smElement* block);
+void coalesceFreeBlock(smElement* block);
+smElement* requestMoreSpace(size_t size);
+void checkAndInitHeap(size_t initial_length);
+//void smMemcpy(void *dest, void *src, size_t n);
+void updateFooter(smElement* element);
+
+void checkAndInitHeap(size_t initial_length) {
+    if(!isInitialized) {
+        minimumStack = sbrk(0);
+        while(initial_length + sizeof(smElement) > breakSize) {
+            breakSize *= 2;
+        }
+        smList = requestMoreSpace(breakSize);
+        isInitialized = true;
+    }
+}
+
+smElement* requestMoreSpace(size_t size) {
+    if(size < minimumSize) {
+        size = minimumSize;
+    }
+
+    smElement* newBlock;
+    if ((newBlock = (smElement *)sbrk((intptr_t)size)) == (void*)-1) {
+        perror("sbrk");
+        exit(EXIT_FAILURE);
+    } else {
+        newBlock->next = NULL;
+        newBlock->previous = NULL;
+        newBlock->stat.previous_length = 0;
+        //newBlock->stat.type = unused;
+        newBlock->stat.length = size - sizeof(BlockStat);
+
+        //smMemcpy((void*)(newBlock) + newBlock->stat.length - sizeof(smElement), newBlock, sizeof(smElement));
+        return newBlock;
+    }
+}
+
+smElement* searchFreeList(size_t length) {
+    smElement* currentBlock = smList;
+    while(currentBlock != NULL) {
+        if(currentBlock->stat.length >= length) {
+            return currentBlock;
+        }
+        currentBlock = currentBlock->next;
+    }
+    return NULL;
+}
+
+BlockStat* removeFreeBlock(smElement* block) {
+    size_t length = block->stat.length;
+    if(block->previous != NULL)
+        block->previous->next = block->next;
+    if(block->next != NULL)
+        block->next->previous = block->previous;
+    if(smList == block) {
+        if (block->previous == NULL && block->next == NULL)
+            smList = NULL;
+        else {
+            if(block->previous != NULL)
+                smList = block->previous;
+            else
+                smList = block->next;
+        }
+    }
+
+    BlockStat* usedBlock = (BlockStat*)(block);
+    //usedBlock->type = type;
+    usedBlock->length = length;
+    return usedBlock;
+}
+
+smElement* insertFreeBlock(BlockStat* block) {
+    smElement* tmpFirst = smList;
+    size_t length = block->length;
+    size_t prev_length = block->previous_length;
+
+    smElement* freeBlock = (smElement*)(block);
+    freeBlock->stat.length = length;
+    freeBlock->stat.previous_length = prev_length;
+    //freeBlock->stat.type = unused;
+    if(tmpFirst != NULL) {
+        freeBlock->previous = tmpFirst->previous;
+        freeBlock->next = tmpFirst;
+        tmpFirst->previous = freeBlock;
+    } else {
+        freeBlock->previous = NULL;
+        freeBlock->next = NULL;
+    }
+    //smMemcpy((void*)(freeBlock) + freeBlock->stat.length - sizeof(smElement), freeBlock, sizeof(smElement));
+    smList = freeBlock;
+    return freeBlock;
+}
+
+void coalesceFreeBlock(smElement* block) {
+    //TODO!
+    /*while((void*)(&block[-1]) >= minimumStack) {
+        if (block[-1].stat.type == unused) {
+            if(block[-1].next->previous == &block[-1]) {
+                smElement *prev = (smElement *) ((void *) (block) - block[-1].stat.length - sizeof(smElement));
+                prev->stat.length += block->stat.length + sizeof(smElement);
+                removeFreeBlock(block);
+            }
+        }
+    }*/
+    /*if(((smElement*)((void*)(block) + block->stat.length + 1))->stat.type == unused) {
+
+    }*/
+    if((char*)block > (char*)(minimumStack)) {
+        if (block->stat.previous_length == (size_t) *((char *) (block) - sizeof(size_t))) {
+            //printf("Free?");
+
+        }
+    }
+}
+
+void updateFooter(smElement* element) {
+    size_t length = element->stat.length;
+    size_t* tmp_length = (size_t*)((char*)(element) + length - sizeof(size_t) - 1);
+    *tmp_length = length;
+}
+#ifdef LIBARY
+void* malloc(size_t length) {
+#else
+void* smalloc(size_t length) {
+#endif
+    checkAndInitHeap(length);
+    smElement* free_element = searchFreeList(length);
+    if(free_element == NULL) {
+        if(length < breakSize + sizeof(BlockStat)) {
+            free_element = requestMoreSpace(breakSize);
+            breakSize *= 2;
+        } else {
+            while(length > breakSize + sizeof(BlockStat)) {
+                breakSize *= 2;
+            }
+            free_element = requestMoreSpace(breakSize);
+        }
+    }
+    while((free_element->stat.length + sizeof(BlockStat)) >= minimumSize * 2) {
+        size_t new_size = (free_element->stat.length + sizeof(BlockStat)) / 2;
+        if(length > new_size - sizeof(BlockStat)) {
+            break;
+        }
+        BlockStat* cut_element = (BlockStat*) ((char*)(free_element) + new_size + 1);
+        cut_element->length = free_element->stat.length - new_size; //- sizeof(BlockStat);
+        //cut_element->type = unused;
+        free_element->stat.length = new_size- sizeof(BlockStat);
+        cut_element->previous_length = free_element->stat.length;
+        updateFooter(insertFreeBlock(cut_element));
+    }
+
+    BlockStat* block = removeFreeBlock(free_element);
+#ifdef DEBUG
+    //printf("Chunk size: %lu (d) + %lu (i) = %lu byte (total)\n", block->length, sizeof(BlockStat), block->length + sizeof(BlockStat));
+#endif
+    return &block[1];
+}
+#ifdef LIBARY
+void free(void* data) {
+#else
+void sfree(void* data) {
+#endif
+    BlockStat* block = (BlockStat*) data;
+    coalesceFreeBlock(insertFreeBlock(&block[-1]));
+    //coalesceFreeBlock();
+}
+
+/*void smMemcpy(void *dest, void *src, size_t n) {
+    char *csrc = (char *)src;
+    char *cdest = (char *)dest;
+
+    for (int i=0; i<n; i++)
+        cdest[i] = csrc[i];
+}*/
+
+#ifdef LIBARY
+void* calloc(size_t nelements, size_t elsize) {
+    void* ptr = malloc(nelements * elsize);
+    memset(ptr, 0, nelements * elsize);
+    return ptr;
+}
+
+void* realloc(void* ptr, size_t size) {
+    free(ptr);
+    return malloc(size);
+}
+#else
+int main() {
+    srand48(0xDEADBEEF);
+
+    /*for(size_t out = 0; out < 20; out++) {
+        int *integer = smalloc(16*sizeof(int));
+        for (size_t i = 0; i < 16; i++) {
+            integer[i] = (int) (20 + i + out);
+        }
+#ifdef DEBUG
+        printf("-----\n");
+        for (size_t i = 0; i < 16; i++) {
+            printf("Value: %d | %p\n", integer[i], &integer[i]);
+        }
+#endif
+        if ((out%2) == 1)
+           sfree(integer);
+    }*/
+    int* elements[100000];
+    for(size_t i = 0; i < 100000; i++) {
+        size_t element_count = (size_t)(drand48()*1000);
+        elements[i] = (int*) smalloc(element_count*sizeof(int));
+        for(size_t j=0;j<element_count;j++) {
+            elements[i][0] = 123;
+        }
+        if(i % 10000 == 0)
+            printf("Value: %p\n", (void*)(elements[i]));
+    }
+    for(size_t i = 0; i < 100000; i++) {
+        if(i % 10000 == 0)
+            printf("Free: %p\n", (void*)(elements[i]));
+        sfree(elements[i]);
+    }
+    for(size_t i = 0; i < 100000; i++) {
+        size_t element_count = (size_t)(drand48()*1000);
+        elements[i] = (int*) smalloc(element_count*sizeof(int));
+        for(size_t j=0;j<element_count;j++) {
+            elements[i][0] = 123;
+        }
+        if(i % 10000 == 0)
+            printf("Value: %p\n", (void*)(elements[i]));
+    }
+    for(size_t i = 0; i < 100000; i++) {
+        if(i % 10000 == 0)
+            printf("Free: %p\n", (void*)(elements[i]));
+        sfree(elements[i]);
+    }
+    return 0;
+}
+#endif
